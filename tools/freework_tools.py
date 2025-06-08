@@ -12,12 +12,13 @@ from server import mcp
 from src.freework_scraper import FreeWorkScraper
 
 @mcp.tool()
-def query_freework_missions(days: int = 7) -> List[Dict[str, Any]]:
+def query_freework_missions(days: int = 7, max_pages: int = 0) -> List[Dict[str, Any]]:
     """
     Récupère les missions publiées sur Free-Work.com depuis moins de X jours
     
     Args:
         days (int): Nombre de jours pour considérer une mission comme récente (défaut: 7)
+        max_pages (int): Nombre maximum de pages à parcourir (défaut: 0 = toutes les pages)
         
     Returns:
         List[Dict[str, Any]]: Liste des missions récentes avec leurs détails
@@ -30,8 +31,8 @@ def query_freework_missions(days: int = 7) -> List[Dict[str, Any]]:
         if not isinstance(days, int) or days < 1 or days > 30:
             return []
         
-        # Récupération des missions récentes
-        missions = scraper.get_recent_missions(days)
+        # Récupération des missions récentes avec la nouvelle pagination
+        missions = scraper.get_recent_missions(days=days, max_pages_limit=max_pages)
         
         return missions
     except Exception as e:

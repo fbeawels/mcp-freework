@@ -322,23 +322,52 @@ class FreeWorkScraper:
                 "url": mission_url
             }
     
-    def get_recent_missions(self, days=7):
+    def get_recent_missions(self, days=7, max_pages_limit=None):
         """
-        Récupère les missions publiées depuis moins de X jours
+        Récupère les missions publiées depuis moins de X jours en utilisant les filtres de fraîcheur de Free-Work
         
         Args:
             days (int): Nombre de jours pour considérer une mission comme récente
+                        Valeurs supportées: 1 (24h), 7, 14, 30, ou tout autre nombre (sans filtre)
+            max_pages_limit (int, optional): Nombre maximum de pages à parcourir. 
+                                           Si None, utilise une valeur par défaut de 10.
+                                           Si 0, parcourt toutes les pages disponibles.
             
         Returns:
             list: Liste des missions récentes
         """
         try:
-            logger.info(f"Récupération des missions des {days} derniers jours")
-            response = self.session.get(self.MISSIONS_URL)
+            # Détermination du filtre de fraîcheur en fonction du nombre de jours
+            freshness_filter = ""
+            if days == 1:
+                freshness_filter = "freshness=less_than_24_hours"
+                logger.info("Filtrage des missions de moins de 24 heures")
+            elif days == 7:
+                freshness_filter = "freshness=less_than_7_days"
+                logger.info("Filtrage des missions de moins de 7 jours")
+            elif days == 14:
+                freshness_filter = "freshness=less_than_14_days"
+                logger.info("Filtrage des missions de moins de 14 jours")
+            elif days == 30:
+                freshness_filter = "freshness=less_than_30_days"
+                logger.info("Filtrage des missions de moins de 30 jours")
+            else:
+                logger.info(f"Aucun filtre de fraîcheur spécifique pour {days} jours, récupération de toutes les missions")
+            
+            # Liste pour stocker tous les liens de missions
+            all_mission_links = []
+            
+            # Récupération de la première page pour déterminer le nombre total de pages
+            url = self.MISSIONS_URL
+            if freshness_filter:
+                url += f"?{freshness_filter}&page=1"
+            else:
+                url += "?page=1"
+            
+            logger.info(f"Récupération de la première page pour déterminer le nombre total: {url}")
+            response = self.session.get(url)
             response.encoding = 'utf-8'  # Force l'encodage UTF-8
             response.raise_for_status()
-            
-            logger.info(f"Page principale récupérée avec succès: {self.MISSIONS_URL}")
             
             # Sauvegarde du HTML pour débogage
             with open('/tmp/freework_debug.html', 'w', encoding='utf-8') as f:
@@ -347,37 +376,115 @@ class FreeWorkScraper:
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Recherche des offres d'emploi
-            mission_links = []
+            # Recherche du nombre total de pages dans le sélecteur de pagination
+            total_pages = 1
+            pagination_select = soup.find('select', {'id': 'pagination-select'})
             
-            # Recherche de tous les liens contenant 'job-mission' qui correspondent aux pages de détail des missions
-            for link in soup.find_all('a', href=True):
-                href = link.get('href')
-                if '/job-mission/' in href:
-                    full_url = href if href.startswith('http') else f"{self.BASE_URL}{href}"
-                    mission_links.append(full_url)
-                    logger.info(f"Lien de mission trouvé: {full_url}")
+            if pagination_select:
+                logger.info(f"Sélecteur de pagination trouvé: {pagination_select.get('id')}")
+                
+                # Méthode 1: Recherche de la dernière option qui contient le nombre total de pages
+                options = pagination_select.find_all('option')
+                logger.info(f"Nombre d'options de pagination trouvées: {len(options)}")
+                
+                if options:
+                    # Trier les options par valeur numérique pour trouver la plus grande
+                    valid_options = []
+                    for option in options:
+                        if option.get('value') and option.get('value').isdigit():
+                            valid_options.append((int(option.get('value')), option))
+                    
+                    if valid_options:
+                        # Trier par valeur numérique décroissante
+                        valid_options.sort(reverse=True)
+                        highest_value, last_option = valid_options[0]
+                        
+                        # Extraction du nombre total de pages (format "530 / 530")
+                        page_text = last_option.text.strip()
+                        logger.info(f"Texte de la dernière option: '{page_text}'" )
+                        
+                        # Essayer différents formats de pagination
+                        total_match = re.search(r'(\d+)\s*/\s*(\d+)', page_text)
+                        if total_match:
+                            total_pages = int(total_match.group(2))
+                            logger.info(f"Format de pagination 'X / Y' détecté: {total_pages} pages")
+                        else:
+                            # Si le format est différent, essayer de récupérer juste le nombre
+                            total_match = re.search(r'(\d+)', page_text)
+                            if total_match:
+                                total_pages = int(total_match.group(1))
+                                logger.info(f"Format de pagination simple détecté: {total_pages} pages")
+                            else:
+                                # Utiliser la valeur numérique la plus élevée des options
+                                total_pages = highest_value
+                                logger.info(f"Format de pagination non reconnu, utilisation de la valeur d'option la plus élevée: {total_pages} pages")
             
-            logger.info(f"Nombre total de liens de missions trouvés: {len(mission_links)}")
+            logger.info(f"Nombre total de pages détecté: {total_pages}")
+            
+            # Limitation du nombre de pages à parcourir pour éviter les temps d'exécution trop longs
+            if max_pages_limit is None:
+                # Valeur par défaut si non spécifiée
+                default_limit = 10
+                max_pages = min(total_pages, default_limit)
+                logger.info(f"Limitation par défaut à {max_pages} pages sur {total_pages} disponibles")
+            elif max_pages_limit == 0:
+                # Aucune limite, parcourir toutes les pages
+                max_pages = total_pages
+                logger.info(f"Aucune limitation: parcours des {total_pages} pages disponibles")
+            else:
+                # Limitation spécifiée par l'utilisateur
+                max_pages = min(total_pages, max_pages_limit)
+                logger.info(f"Limitation à {max_pages} pages sur {total_pages} disponibles (limite spécifiée: {max_pages_limit})")
+            
+            # Parcours de toutes les pages de résultats
+            for page in range(1, max_pages + 1):
+                # Construction de l'URL avec les paramètres de filtre et de pagination
+                url = self.MISSIONS_URL
+                if freshness_filter:
+                    url += f"?{freshness_filter}&page={page}"
+                else:
+                    url += f"?page={page}"
+                
+                # Ne pas refaire la requête pour la page 1 car on l'a déjà récupérée
+                if page > 1:
+                    logger.info(f"Récupération de la page {page}/{max_pages}: {url}")
+                    response = self.session.get(url)
+                    response.encoding = 'utf-8'  # Force l'encodage UTF-8
+                    response.raise_for_status()
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Recherche des liens de missions sur cette page
+                page_mission_links = []
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href')
+                    if '/job-mission/' in href:
+                        full_url = href if href.startswith('http') else f"{self.BASE_URL}{href}"
+                        page_mission_links.append(full_url)
+                
+                # Si aucun lien trouvé sur cette page, on arrête la pagination
+                if not page_mission_links:
+                    logger.info(f"Aucune mission trouvée sur la page {page}, fin de la pagination")
+                    break
+                else:
+                    logger.info(f"Trouvé {len(page_mission_links)} liens de missions sur la page {page}/{max_pages}")
+                    all_mission_links.extend(page_mission_links)
             
             # Dédupliquer les liens
-            mission_links = list(set(mission_links))
-            logger.info(f"Nombre de liens uniques: {len(mission_links)}")
+            all_mission_links = list(set(all_mission_links))
+            logger.info(f"Nombre total de liens uniques de missions trouvés: {len(all_mission_links)}")
             
             recent_missions = []
             
-            # Parcours des liens de missions
-            for mission_url in mission_links:
+            # Parcours des liens de missions pour extraire les détails
+            for mission_url in all_mission_links:
                 logger.info(f"Traitement de la mission: {mission_url}")
                 
                 # Extraction des détails de la mission
                 mission_details = self._extract_mission_details(mission_url)
-                logger.info(f"Détails extraits: {mission_details}")
                 
-                # Pour Free-Work, nous n'avons pas de date précise de publication
-                # Donc on considère toutes les missions comme récentes
+                # Ajout de la mission à la liste
                 recent_missions.append(mission_details)
-                logger.info(f"Mission ajoutée: {mission_details['titre']}")
+                logger.info(f"Mission ajoutée: {mission_details['titre']} {mission_details['localisation']}")
             
             logger.info(f"Nombre total de missions récentes trouvées: {len(recent_missions)}")
             return recent_missions
@@ -388,7 +495,17 @@ class FreeWorkScraper:
 
 if __name__ == "__main__":
     # Test du scraper
-    scraper = FreeWorkScraper()
-    missions = scraper.get_recent_missions()
+    import argparse
     
+    parser = argparse.ArgumentParser(description='Scraper pour Free-Work.com')
+    parser.add_argument('--days', type=int, default=7, 
+                        help='Fraîcheur des missions (1, 7, 14, 30 jours, autre=sans filtre)')
+    parser.add_argument('--max-pages', type=int, default=None, 
+                        help='Nombre maximum de pages à parcourir (0=toutes les pages)')
+    args = parser.parse_args()
+    
+    scraper = FreeWorkScraper()
+    missions = scraper.get_recent_missions(days=args.days, max_pages_limit=args.max_pages)
+    
+    print(f"Nombre total de missions récupérées: {len(missions)}")
     print(json.dumps(missions, indent=2, ensure_ascii=False))
